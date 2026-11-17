@@ -5,42 +5,13 @@ Jacob A. Comer
 
 ``` r
 require(terra)
-```
-
-    ## Loading required package: terra
-
-    ## terra 1.9.34
-
-``` r
 require(ranger)
-```
-
-    ## Loading required package: ranger
-
-``` r
 require(pROC)
 ```
-
-    ## Loading required package: pROC
-
-    ## Type 'citation("pROC")' for a citation.
-
-    ## 
-    ## Attaching package: 'pROC'
-
-    ## The following objects are masked from 'package:stats':
-    ## 
-    ##     cov, smooth, var
 
 ``` r
 # load in stack of predictor layers and class labels
 paths <- yaml::read_yaml('paths.yml')
-```
-
-    ## Warning in readLines(file, warn = readLines.warn): incomplete final line found
-    ## on 'paths.yml'
-
-``` r
 predictors <- rast(path.expand(paths$predictors))
 labels <- vect(path.expand(paths$labels))
 
