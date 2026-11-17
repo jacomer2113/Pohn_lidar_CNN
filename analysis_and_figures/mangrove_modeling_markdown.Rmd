@@ -1,0 +1,260 @@
+---
+title: "Mangrove modeling, Pohnpei airborne lidar, 2023-2024"
+author: "Jacob A. Comer"
+date: "2026-11-17"
+output: github_document
+---
+
+```{r prelim, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r packages, warning = FALSE, results = 'hide', message = FALSE}
+require(terra)
+require(ranger)
+require(pROC)
+```
+
+```{r setup}
+# load in stack of predictor layers and class labels
+paths <- yaml::read_yaml('paths.yml')
+predictors <- rast(path.expand(paths$predictors))
+labels <- vect(path.expand(paths$labels))
+
+# extract values of predictor layers at labelled locations
+vals <- extract(predictors, labels, cells = TRUE, ID = FALSE)
+
+train_df <- data.frame(class = factor(labels$class), vals)
+train_df <- train_df[complete.cases(train_df), ]
+
+# extract coordinates from center of each labeled cell
+xy <- xyFromCell(predictors, train_df$cell)
+train_df$cell <- NULL
+print(table(train_df$class))
+```
+
+Manually labeled data includes 350 mangrove cells (1), 650 non-mangrove land cells (2), and 200 water cells (3).
+
+Below create 2-by-2-km blocks that will divide the manually labeled data into five folds for cross-validation.
+
+```{r blocks}
+set.seed(2113)
+
+# create 2x2-km blocks
+block <- paste(floor(xy[, 1] / 2000), floor(xy[, 2] / 2000))
+blocks <- unique(block)
+
+# assign each block to one of 5 folds
+fold <- sample(rep(1:5, length.out = length(blocks)))[match(block, blocks)]
+
+# identify classes
+cls <- levels(train_df$class)  # 1 mangroves, 2 everything else, 3 water
+
+# empty objects to hold predictions
+pred_cv <- factor(rep(NA, nrow(train_df)), levels = cls)
+prob_cv <- matrix(NA, nrow(train_df), length(cls), dimnames = list(NULL, cls))
+```
+
+Run 5-fold cross-validation.
+
+```{r CV}
+# 5-fold cross-validation
+for (k in 1:5) {
+  train_k <- train_df[fold != k, ]
+  test_k <- train_df[fold == k, ]
+  
+  fit <- ranger(class ~ ., data = train_k, num.trees = 500, seed = 2113)
+  pred_cv[fold == k] <- predict(fit, data = test_k)$predictions
+  
+  fit_p <- ranger(class ~ ., data = train_k, num.trees = 500,
+                  probability = TRUE, seed = 2113)
+  prob_cv[fold == k, ] <- predict(fit_p, data = test_k)$predictions[, cls]
+}
+
+confusion <- table(observed = train_df$class, predicted = pred_cv)
+print(confusion)
+```
+
+Other metrics of model performance:
+
+```{r performance}
+# calculate precision, recall, and F1 for each class
+precision <- diag(confusion) / colSums(confusion)
+recall <- diag(confusion) / rowSums(confusion)
+f1 <- 2 * precision * recall / (precision + recall)
+
+# calculate AUC for each of the three classes against the other two
+auc_for_class <- function(k) {
+  roc_k <- roc(response = as.integer(train_df$class == k),
+               predictor = prob_cv[, k],
+               levels = c(0, 1), direction = '<', quiet = TRUE)
+  as.numeric(auc(roc_k))
+}
+
+auc_vals <- sapply(cls, auc_for_class)
+
+metrics <- data.frame(class = c('mangrove', 'all else', 'water'),
+                      precision, recall, f1, auc = auc_vals)
+print(metrics)
+colMeans(metrics[, -1]) # macro averages (unweighted by proportional class size)
+print(sum(diag(confusion)) / sum(confusion))  # overall accuracy
+```
+
+Train a random forest on all the manually labeled data and generate the mangrove/non-mangrove land/water map.
+
+```{r random_forest}
+ranfor <- ranger(class ~ ., data = train_df, num.trees = 500,
+                 importance = 'permutation', seed = 2113)
+print(ranfor)
+sort(ranfor$variable.importance, decreasing = TRUE)
+
+# define function to convert terra::predict output from factor to integer
+ranfor_fun <- function(model, data, ...) {
+  as.integer(as.character(predict(model, data = data)$predictions))
+}
+
+class_map <- predict(predictors, ranfor, fun = ranfor_fun, na.rm = TRUE)
+```
+
+Clean up and derive measures from the output. This includes calculating how much of the output map remains NA due to cloud cover, calculating the size of the gap in the center of the DTM, etc.
+
+```{r finalize_map}
+# define function to calculate area of binary mask positives
+area_km2 <- function(r) {
+  n_cells <- global(r, 'sum', na.rm = TRUE)[[1]]
+  cell_area_m2 <- prod(res(r))
+  n_cells * cell_area_m2 / 1000000
+}
+
+# read in and resample the DTM
+dtm <- rast(path.expand(paths$dtm_10m))
+dtm_10m <- resample(dtm, predictors$nir, method = 'average')
+
+# total area skipped within modeled area
+cloud_na <- is.na(class_map) & !is.na(predictors$elev)
+
+# scanned ground above the modeling elevation cutoff
+cutoff <- 175
+high <- subst(dtm_10m >= cutoff, NA, 0)
+
+# find central gap in the DTM. First, group connected cells into patches
+p <- patches(ifel(is.na(dtm_10m), 1, NA), directions = 8)
+nr <- nrow(p)
+nc <- ncol(p)
+
+# identify raster edge cells
+edge_cells <- c(cellFromRowCol(p, 1, 1:nc), cellFromRowCol(p, nr, 1:nc),
+                cellFromRowCol(p, 1:nr, 1), cellFromRowCol(p, 1:nr, nc))
+
+# identify the patches to which the edge cells belong
+edge_ids <- unique(na.omit(p[edge_cells][, 1]))
+
+# find patch sizes
+sizes <- freq(p)
+
+# ignore patches that touch the raster edges
+interior <- sizes[!sizes$value %in% edge_ids, ]
+
+# find the largest interior patch
+gap <- subst(p == interior$value[which.max(interior$count)], NA, 0)
+
+# fill in the class map
+final_map <- class_map
+final_map <- ifel(is.na(final_map) & (high == 1 | gap == 1), 2, final_map)
+final_map <- ifel(is.na(final_map) & !cloud_na, 3, final_map)
+
+# fill the tiny gaps left in the final map by cloud cover
+filled <- final_map
+for (i in 1:20) {
+  filled <- focal(filled, w = 3, fun = 'modal', na.policy = 'only',
+                  na.rm = TRUE)
+  n_left <- global(cloud_na & is.na(filled), 'sum', na.rm = TRUE)[[1]]
+  if (n_left == 0) break
+}
+final_filled <- ifel(cloud_na, filled, final_map)
+area_km2(cloud_na)
+
+# areas of the three classes (1 mangrove, 2 everything else, 3 water)
+f <- freq(final_filled)
+f$km2 <- f$count * prod(res(final_filled)) / 1000000
+f
+
+# calculate mainland area; start by grouping final_map == 2 into patches
+land <- ifel(final_filled == 2, 1, NA)
+id <- patches(land, directions = 8)
+
+# rank patches by size
+size <- freq(id)[, c('value', 'count')]
+size <- size[order(size$count, decreasing = TRUE), ]
+size$km2 <- size$count * prod(res(id)) / 1000000
+head(size, 10)
+
+# map the 10 largest, colored by patch ID, to see which is which
+top10 <- ifel(id %in% size$value[1:10], id, NA)
+plot(top10, type = 'classes')
+
+# Sokehs and Temwen are already included with mainland; include Takaieu
+# and Dehpehk as well
+mainland_ids <- size$value[c(1, 2, 4)]
+mainland <- ifel(id %in% mainland_ids, id, NA)
+
+# there are some tiny patches of mainland misclassified as mangrove; fill them
+mainland_2 <- ifel(id %in% mainland_ids, 1, NA)
+footprint <- fillHoles(as.polygons(mainland_2))
+in_main <- rasterize(footprint, final_filled, background = 0)
+sv <- sieve(final_filled, threshold = 20, directions = 8) # max gap 2000 m ^ 2
+final_fixed <- ifel(in_main == 1 & (final_filled == 1 | is.na(final_filled)),
+                    sv, final_filled)
+
+# recalculate mainland area from fixed mainland patch
+land <- ifel(final_fixed == 2, 1, NA)
+id <- patches(land, directions = 8)
+size <- freq(id)[, c('value', 'count')]
+size <- size[order(size$count, decreasing = TRUE), ]
+size$km2 <- size$count * prod(res(id)) / 1000000
+mainland_ids <- size$value[c(1, 2, 4)]
+mainland <- ifel(id %in% mainland_ids, id, NA)
+# Mainland here includes the land-tied islands of Sokehs, Temwen, Takaieu, and
+# Dehpehk
+plot(mainland)  # (no mangroves)
+
+# find all land patches that are not included with the mainland
+others <- size[!(size$value %in% mainland_ids), ]
+
+# threshold them by area
+min_cells <- 200  # this equates to 20000 m ^ 2
+others <- others[others$count >= min_cells, ]
+
+# find mean canopy height of those patches
+ch <- ifel(predictors$h_p95 < 0, NA, predictors$h_p95)
+other_ch <- zonal(ch, id, fun = 'mean', na.rm = TRUE)
+names(other_ch) <- c('value', 'mean_h')
+others <- merge(others, other_ch, by = 'value')
+
+# we count as small islands only small land patches that have a mean
+# canopy height of 2 m or more; if no vegetation, probably reef
+small_islands <- others[!is.na(others$mean_h) & others$mean_h >= 2, ]
+small_island_patches <- ifel(id %in% small_islands$value, 1, 0)
+
+mangrove_binary <- ifel(final_fixed == 1, 1, NA)
+
+print(paste0('Mainland size: ', sum(size$km2[size$value %in% mainland_ids])))
+print(paste0('Gap size: ', area_km2(gap)))
+print(paste0('Mangrove area: ', area_km2(mangrove_binary)))
+print(paste0('Lagoon islands area: ', sum(small_islands$km2)))
+print(paste0('Mainland, lagoon islands, and mangroves: ',
+             sum(size$km2[size$value %in% mainland_ids]) + 
+             area_km2(mangrove_binary) + 
+             sum(small_islands$km2)))
+print(paste0('Surveyed area: ',
+             sum(size$km2[size$value %in% mainland_ids]) -
+             area_km2(gap) +
+             area_km2(mangrove_binary) +
+             sum(small_islands$km2)))
+```
+
+The overall, final mangrove/non-mangrove land/water map:
+
+```{r final_map}
+plot(final_fixed)
+```
