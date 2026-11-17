@@ -58,7 +58,7 @@ islet_sf <- scanned_land[which(scanned_land$area != max(scanned_land$area, na.rm
 
 # Set samp_and_plot equal to FALSE once this has been done successfully,
 # because the sampling takes forever.
-samp_and_plot <- FALSE
+samp_and_plot <- TRUE
 if (samp_and_plot == TRUE) {
   # Define a function to grab a random sample of 250 circular areas of 
   # 250 m^2 each from across a given input polygon.
@@ -105,7 +105,8 @@ if (samp_and_plot == TRUE) {
   pohn_all_samp <- circ_samp(scanned_land)
   
   # Make a vertical histogram for mainland Pohnpei only.
-  main_point_height_plot <- ggplot(pohn_main_samp, aes(y = height, fill = return_num)) +
+  main_point_height_plot <- ggplot(subset(pohn_main_samp, return_num %in% 1:3),
+                                   aes(y = height, fill = return_num)) +
     geom_histogram(binwidth = 0.5) +
     labs(x = 'Number of returns',
          y = 'Height above ground (m)',
@@ -115,12 +116,14 @@ if (samp_and_plot == TRUE) {
     xlim(y = c(0, 100000)) +
     guides(fill = 'none') + 
     theme(plot.title = element_text(size = 14),
-          axis.title = element_text(size = 12))
+          axis.title = element_text(size = 12),
+          axis.title.x = element_blank())
   
   main_point_height_plot
   
   # Do the same for the lagoon islets . . .
-  lagoon_point_height_plot <- ggplot(lagoon_islet_samp, aes(y = height, fill = return_num)) +
+  lagoon_point_height_plot <- ggplot(subset(lagoon_islet_samp, return_num %in% 1:3),
+                                     aes(y = height, fill = return_num)) +
     geom_histogram(binwidth = 0.5) +
     labs(x = 'Number of returns',
          fill = 'Return number',
@@ -129,19 +132,27 @@ if (samp_and_plot == TRUE) {
     xlim(y = c(0, 100000)) +
     guides(fill = 'none') + theme(axis.title.y = element_blank()) + 
     theme(plot.title = element_text(size = 14),
-          axis.title = element_text(size = 12))
+          axis.title = element_text(size = 12),
+          axis.title.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.y = element_blank())
   
   lagoon_point_height_plot
   
   # and for all the surveyed land.
-  all_point_height_plot <- ggplot(pohn_all_samp, aes(y = height, fill = return_num)) +
+  all_point_height_plot <- ggplot(subset(pohn_all_samp, return_num %in% 1:3),
+                                  aes(y = height, fill = return_num)) +
     geom_histogram(binwidth = 0.5) +
     labs(x = 'Number of returns',
          fill = 'Return number',
          title = 'All surveyed land') +
     ylim(y = c(-1.5, 42)) +
     xlim(y = c(0, 100000)) +
-    guides(fill = 'none') + theme(axis.title.y = element_blank()) + 
+#    guides(fill = 'none') +
+    theme(axis.title.y = element_blank(),
+          axis.title.x = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.y = element_blank()) + 
     
 #    guides(fill = guide_legend(reverse = TRUE)) + theme(axis.title.y = element_blank()) + 
     theme(plot.title = element_text(size = 14),
