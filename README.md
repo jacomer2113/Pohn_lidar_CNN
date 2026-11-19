@@ -15,17 +15,23 @@ the figures for the manuscript (analysis_and_figures).
 
 The first of these directories, point_cloud_to_rasters, contains only
 one script, which is relatively straightforward. The second, CNN_modeling,
-is more complicated, for which reason I include a specific script,
-demonstration_script.R, to show how the four functions in that directory
-lead from one to the next and, together, constitute the modeling workflow.
-Last, in analysis_and_figures, the script called pmap_analysis.R is the one
+is more complicated. The modeling process is implemented in four functions:
+raster_chunking.R, generate_images.R, train_test_cnn.R, and
+run_cnn_predictions.R. For clarity's sake I include a script,
+demonstration_script.R, that calls the four functions and demonstrates how
+together they constitute the modeling workflow. Last, in analysis_and_figures,
+the script called pmap_analysis.R is the one
 that performs most of the analysis of the model output; it also generates
-some of the manuscript's figures. The script S2_mask.R generates,
-from a stack of Sentinel-2 imagery, masks for the mangroves and water
-around Pohnpei. The script point_cloud_eval.R evaluates the point
+some of the manuscript's figures. The script point_cloud_eval.R evaluates the point
 cloud data set -- that is, for gathering measurements of pulse density,
-ground point density, etc. for different parts of the survey area
-(see Table 1 of the manuscript).
+ground point density, etc. for different parts of the survey area.
+The script mangrove_predictors_for_pub.R
+shows how the data necessary for classifying mangrove, non-mangrove land, and
+water is assembled; it generates a raster stack at 10-m resolution of
+Sentinel-2 spectral reflectance data, spectral indices, and elevation and
+vegetation structure metrics from the lidar point cloud. The markdown document
+mangrove_modeling_markdown.md demonstrates the mangrove/non-mangrove land/water
+modeling process itself.
 
 Data inputs are specified by reference to a .yml file. For the purposes of
-demonstration this .yml file is a simulated example.
+demonstration the contents of this .yml file are simulated examples.
