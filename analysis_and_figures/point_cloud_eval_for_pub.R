@@ -3,178 +3,133 @@ require(sf)
 require(lidR)
 require(ggplot2)
 
-# load in water mask
-water_mask <- rast('~/nir_water_mask_10m.tif')
-
-# and DTM
-dtm <- rast('DTM_denoised_corrected_kriging_1m.tif')
-
-# Resample the DTM to match the resolution and extent of the water mask.
-dtm_resamp <- resample(dtm, water_mask, method = 'bilinear')
-dtm_resamp <- subst(dtm_resamp, NA, min(values(dtm_resamp), na.rm = TRUE))
-
-# Make the resampled DTM binary.
-dtm_r_bin <- dtm_resamp
-dtm_r_bin[dtm_r_bin < -2164] <- 0
-dtm_r_bin[dtm_r_bin != 0] <- 2
-
-# Identify the overlap between the DTM and the water.
-overlap <- dtm_r_bin + water_mask
-
-# Isolate only the area that has both been scanned and is not water.
-positive <- overlap
-positive[positive != 2] <- NA
-
-# Polygonize the surveyed land areas.
-scanned_land_vect <- as.polygons(positive, dissolve = TRUE)
-scanned_land <- sf::st_as_sf(scanned_land_vect)  # Make those vectors into an sf object.
-scanned_land <- sf::st_cast(scanned_land, 'POLYGON')  # Recast the multipolygon object as
-# a polygon object.
-scanned_areas <- as.numeric(sf::st_area(scanned_land))  # Calculate the polygons' areas.
-scanned_land$area <- scanned_areas  # Add those areas to the sf object.
-
-scanned_filt <- scanned_land[which(scanned_land$area > 500), ] # Filter out
-# polygons smaller than 500 m^2, many of which seem to result from small areas
-# of spurious data over the lagoon.
-
-print(paste0(sum(scanned_filt$area) / 1000000, ' square km of land surveyed.'))
-
-# What is the area of the data gap in the center?
-central_box <- ext(c(410000, 419000, 756000, 766500))
-central_area <- crop(positive, central_box)
-ca_area <- (nrow(central_area) * 10) * (ncol(central_area) * 10)
-pos_ca_area <- expanse(central_area)
-neg_ca_area <- ca_area - pos_ca_area[2]
-
-print(paste0(neg_ca_area / 1000000, ' square km of land in island center missed.'))
-
-# Read in our las catalog.
-cat <- readLAScatalog('~/las_ellip_noise_classified/')
-
-# Pick out the sf POLYGON for mainland Pohnpei. For some reason, the airport
-# is not included here, but that's okay.
-pohn_sf <- scanned_land[which(scanned_land$area == max(scanned_land$area, na.rm = TRUE)), ]
-islet_sf <- scanned_land[which(scanned_land$area != max(scanned_land$area, na.rm = TRUE)), ]
-
-# Set samp_and_plot equal to FALSE once this has been done successfully,
-# because the sampling takes forever.
-samp_and_plot <- TRUE
-if (samp_and_plot == TRUE) {
-  # Define a function to grab a random sample of 250 circular areas of 
-  # 250 m^2 each from across a given input polygon.
-  circ_samp <- function(input_shp) {
-    samp <- st_sf(st_sample(input_shp, 1000))
-    area_samp <- st_buffer(samp, dist = sqrt(250 / pi))
-    success_index <- 0
-    i <- 1
-    while (success_index < 250) {
-      cur_cat <- clip_roi(cat, area_samp[i, ])
-      if (nrow(cur_cat@data) == 0) {
-        i <- i + 1
-        print('fail')
-        next
-      } else {
-        cur_las <- normalize_height(cur_cat, dtm)
-        cur_df <- data.frame(cur_las@data$Z, cur_las@data$ReturnNumber)
-        if (success_index == 0) {
-          sum_df <- cur_df
-        } else {
-          sum_df <- rbind(sum_df, cur_df)
-        }
-        i <- i + 1
-        success_index <- success_index + 1
-        print(paste0('Done ', success_index, ' of ', 250))
-      }
+# Define a function to take, from an input set of points, a circular sample 
+# area of 250 m ^ 2 from the point cloud.
+circ_samp <- function(samp_points, in_las_ctg, n_success = 250, area_m2 = 250) {
+  area_samp <- st_buffer(samp_points, dist = sqrt(area_m2 / pi))
+  results <- vector('list', n_success)
+  success_index <- 0
+  i <- 1
+  
+  while (success_index < n_success) {
+    i <- i + 1
+    if (i > nrow(area_samp)) {
+      stop(paste0('Only ', success_index, ' of ', n_success,
+                  ' samples contained points; provide more sample points.'))
     }
-    colnames(sum_df) <- c('height', 'return_num')
-    sum_df$return_num <- as.factor(sum_df$return_num)
-    sum_df$return_num <- factor(sum_df$return_num,
-                                levels = levels(sum_df$return_num)[order(
-                                  levels(sum_df$return_num), decreasing = TRUE)])
-    return(sum_df)
-  }
-  
-  # Grab that sample from across the Pohnpei mainland . . . 
-  set.seed(4303)
-  pohn_main_samp <- circ_samp(pohn_sf)
-  
-  # . . . the lagoon islets only . . . 
-  lagoon_islet_samp <- circ_samp(islet_sf)
-  
-  # . . . and from all the surveyed land.
-  pohn_all_samp <- circ_samp(scanned_land)
-  
-  # Make a vertical histogram for mainland Pohnpei only.
-  main_point_height_plot <- ggplot(subset(pohn_main_samp, return_num %in% 1:3),
-                                   aes(y = height, fill = return_num)) +
-    geom_histogram(binwidth = 0.5) +
-    labs(x = 'Number of returns',
-         y = 'Height above ground (m)',
-         fill = 'Return number',
-         title = 'Mainland Pohnpei') +
-    ylim(y = c(-1.5, 42)) +
-    xlim(y = c(0, 100000)) +
-    guides(fill = 'none') + 
-    theme(plot.title = element_text(size = 14),
-          axis.title = element_text(size = 12),
-          axis.title.x = element_blank())
-  
-  main_point_height_plot
-  
-  # Do the same for the lagoon islets . . .
-  lagoon_point_height_plot <- ggplot(subset(lagoon_islet_samp, return_num %in% 1:3),
-                                     aes(y = height, fill = return_num)) +
-    geom_histogram(binwidth = 0.5) +
-    labs(x = 'Number of returns',
-         fill = 'Return number',
-         title = 'Lagoon islets') +
-    ylim(y = c(-1.5, 42)) +
-    xlim(y = c(0, 100000)) +
-    guides(fill = 'none') + theme(axis.title.y = element_blank()) + 
-    theme(plot.title = element_text(size = 14),
-          axis.title = element_text(size = 12),
-          axis.title.y = element_blank(),
-          axis.ticks.y = element_blank(),
-          axis.text.y = element_blank())
-  
-  lagoon_point_height_plot
-  
-  # and for all the surveyed land.
-  all_point_height_plot <- ggplot(subset(pohn_all_samp, return_num %in% 1:3),
-                                  aes(y = height, fill = return_num)) +
-    geom_histogram(binwidth = 0.5) +
-    labs(x = 'Number of returns',
-         fill = 'Return number',
-         title = 'All surveyed land') +
-    ylim(y = c(-1.5, 42)) +
-    xlim(y = c(0, 100000)) +
-#    guides(fill = 'none') +
-    theme(axis.title.y = element_blank(),
-          axis.title.x = element_blank(),
-          axis.ticks.y = element_blank(),
-          axis.text.y = element_blank()) + 
     
-#    guides(fill = guide_legend(reverse = TRUE)) + theme(axis.title.y = element_blank()) + 
-    theme(plot.title = element_text(size = 14),
-          axis.title = element_text(size = 12),
-          legend.title = element_text(size = 12),
-          legend.text = element_text(size = 12))
-  
-  all_point_height_plot
+    cur_las <- clip_roi(in_las_ctg, area_samp[i, ])
+    if (is.null(cur_las) || npoints(cur_las) == 0) next
+    
+    success_index <- success_index + 1
+    results[[success_index]] <- data.frame(height = cur_las@data$Z,
+                                           return_num = cur_las@data$ReturnNumber)
+    message('Done ', success_index, ' of ', n_success)
+  }
+    sum_df <- do.call(rbind, results)
+    sum_df$return_num <- factor(sum_df$return_num,
+                                levels = sort(unique(sum_df$return_num),
+                                              decreasing = TRUE))
+    sum_df
 }
-  
-# Assess pulse and ground point densities.
-pulse <- rast('~/pulse_density_1m_corrected_denoised.tif')
-point <- rast('~/point_density_1m_corrected_denoised.tif')
-ground <- rast('~/ground_point_density_1m_corrected_denoised.tif')
 
-# Make a rasterized version of the sf object showing scanned land areas.
-rast_scanned <- rasterize(vect(scanned_land), pulse)
+# identify input dataset paths
+paths <- yaml::read_yaml('../paths.yml')
+
+# load in land groups layer
+land_groups <- rast(path.expand(paths$land_groups))
+
+# read in las catalog
+ctg <- readLAScatalog(path.expand(paths$lidar_catalog))
+opt_filter(ctg) <- '-drop_class 7 18'  # drop noise
+
+# sample lidar points from one land group (keeping sample circles within
+# land boundaries)
+sample_group <- function(groups, values, n) {
+  r <- ifel(groups %in% values, 1, NA)
+  r <- focal(r, w = 3, fun = 'min', na.rm = FALSE)  # drop cells at edge
+  pts <- spatSample(r, size = n, method = 'random', na.rm = TRUE,
+                    as.points = TRUE)
+  st_as_sf(pts)
+}
+
+set.seed(4303)
+pohn_main_samp <- circ_samp(sample_group(land_groups, 1, 1000), ctg)
+lagoon_islet_samp <- circ_samp(sample_group(land_groups, 2, 1000), ctg)
+pohn_all_samp <- circ_samp(sample_group(land_groups, values = c(1, 2),
+                                        n = 1000), ctg)
+
+# Make a vertical histogram for mainland Pohnpei only.
+main_point_height_plot <- ggplot(subset(pohn_main_samp, return_num %in% 1:3),
+                                 aes(y = height, fill = return_num)) +
+  geom_histogram(binwidth = 0.5) +
+  labs(x = 'Number of returns',
+       y = 'Height above ground (m)',
+       fill = 'Return number',
+       title = 'Mainland Pohnpei') +
+  ylim(y = c(-1.5, 42)) +
+  xlim(y = c(0, 100000)) +
+  guides(fill = 'none') +
+  theme(
+    plot.title = element_text(size = 14),
+    axis.title = element_text(size = 12),
+    axis.title.x = element_blank()
+  )
+main_point_height_plot
+
+# Do the same for the lagoon islets . . .
+lagoon_point_height_plot <- ggplot(subset(lagoon_islet_samp, return_num %in% 1:3),
+                                   aes(y = height, fill = return_num)) +
+  geom_histogram(binwidth = 0.5) +
+  labs(x = 'Number of returns', fill = 'Return number', title = 'Lagoon islets') +
+  ylim(y = c(-1.5, 42)) +
+  xlim(y = c(0, 100000)) +
+  guides(fill = 'none') + theme(axis.title.y = element_blank()) +
+  theme(
+    plot.title = element_text(size = 14),
+    axis.title = element_text(size = 12),
+    axis.title.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.y = element_blank()
+  )
+lagoon_point_height_plot
+
+# . . . and for all the surveyed land.
+all_point_height_plot <- ggplot(subset(pohn_all_samp, return_num %in% 1:3),
+                                aes(y = height, fill = return_num)) +
+  geom_histogram(binwidth = 0.5) +
+  labs(x = 'Number of returns', fill = 'Return number', title = 'All surveyed land') +
+  ylim(y = c(-1.5, 42)) +
+  xlim(y = c(0, 100000)) +
+  #    guides(fill = 'none') +
+  theme(
+    axis.title.y = element_blank(),
+    axis.title.x = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.text.y = element_blank()
+  ) +
+  
+  #    guides(fill = guide_legend(reverse = TRUE)) + theme(axis.title.y = element_blank()) +
+  theme(
+    plot.title = element_text(size = 14),
+    axis.title = element_text(size = 12),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 12)
+  )
+all_point_height_plot
+
+# Assess pulse and ground point densities.
+pulse <- rast(path.expand(paths$pulse_density))
+point <- rast(path.expand(paths$point_density))
+ground <- rast(path.expand(paths$grnd_density))
+
+# Resample land_groups to match the density layers.
+land_1m <- resample(land_groups, pulse)
 
 # Mask the pulse, point, and ground point density layers.
-pulse_masked <- mask(pulse, rast_scanned)
-point_masked <- mask(point, rast_scanned)
-ground_masked <- mask(ground, rast_scanned)
+pulse_masked <- mask(pulse, land_1m)
+point_masked <- mask(point, land_1m)
+ground_masked <- mask(ground, land_1m)
 
 # Compute layers for returns/pulse, ground returns/pulse, and ground returns/return.
 point_pulse <- point_masked / pulse_masked
@@ -217,7 +172,7 @@ lidar_metrics <- function(input_shp) {
 }
 
 # Apply them to our 4 areas of particular interest.
-aoi_dir <- paste0('~/report/AOIs/')
+aoi_dir <- path.expand(paths$aois)
 shp_names <- grep('.shp', dir(aoi_dir), value = TRUE)
 for (i in 1:length(shp_names)) {
   print(paste0('Generating metrics for ', shp_names[i]))

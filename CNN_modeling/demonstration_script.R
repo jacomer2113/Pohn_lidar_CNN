@@ -16,11 +16,14 @@ source('./generate_images.R')
 source('./train_test_cnn.R')
 source('./run_cnn_predictions.R')
 
-chunks_to_label <- raster_chunking(raster = rast('path/to/Pohnpei_normalized_DTM.tif'),
+# Identify input data paths.
+paths <- yaml::read_yaml('../paths.yml')
+
+chunks_to_label <- raster_chunking(raster = rast(path.expand(paths$slrm)),
                                    output_map_res = 10)
 
 # Write chunks_to_label as a shapefile.
-st_write(chunks_to_label, 'shapefile_filename.shp')
+st_write(chunks_to_label, path.expand(paths$unlabeled_chunks))
 
 # The following step requires GIS software. shapefile_filename is opened in
 # a GIS, like QGIS, and some of the square polygons, or chunks, are labeled. 
@@ -33,15 +36,19 @@ st_write(chunks_to_label, 'shapefile_filename.shp')
 # otherwise. Once this labeling process is complete, we load the chunks
 # shapefile back in:
 
-labeled_chunks <- st_read('shapefile_filename.shp')
+labeled_chunks <- st_read(path.expand(paths$labeled_chunks))
 
 testing_data_labels <- generate_images(labeled_chunks,
-                                       raster_layer = rast('path/to/Pohnpei_normalized_DTM.tif'),
+                                       raster_layer = rast(
+                                         path.expand(paths$slrm)),
                                        image_size = 75,
-                                       image_output_directory = 'directory/for/images')
+                                       image_output_directory = path.expand(
+                                         paths$cnn_image_dir
+                                       ))
 
 model_performance <- train_test_cnn(testing_data_labels,
-                                    image_input_directory = '/directory/for/images',
+                                    image_input_directory = path.expand(
+                                      paths$cnn_image_dir),
                                     architecture = 'VGG19',
                                     model_output_filename = 'model_name',
                                     validation_proportion = 0.1,
@@ -51,8 +58,10 @@ model_performance <- train_test_cnn(testing_data_labels,
 print(model_performance)
 
 output_prob_map <- run_cnn_predictions(labeled_chunks,
-                                       raster_layer = rast('path/to/Pohnpei_normalized_DTM.tif'),
-                                       model = keras::load_model_tf('model_name'))
+                                       raster_layer =
+                                         rast(path.expand(paths$slrm)),
+                                       model =
+                                         keras::load_model_tf('model_name'))
 
 # Note that output_prob_map will be NA in all areas that were not run 
 # through the model, which includes the areas that were labeled to serve as

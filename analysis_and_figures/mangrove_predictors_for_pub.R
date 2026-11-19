@@ -2,8 +2,11 @@ require(terra)
 require(lidR)
 require(ranger)
 
+# get file paths
+paths <- yaml::read_yaml('../paths.yml')
+
 # assemble Sentinel-2 data
-sent_dir <- file.path('~/S2_download_dir/')  # Sentinel-2 download directory
+sent_dir <- path.expand(paths$S2_directory)  # Sentinel-2 download directory
 
 # define function to extract specific band data from S2 download
 grab_s2_stack <- function(sentinel_dir, identifying_string, resolution = 'R10m',
@@ -116,7 +119,7 @@ indices <- c(ndvi, ndmi, mvi)
 names(indices) <- c('ndvi', 'ndmi', 'mvi')
 
 # read in las catalog
-ctg <- readLAScatalog('~/lidar_data/las_catalog/')
+ctg <- readLAScatalog(path.expand(paths$lidar_catalog))
 opt_select(ctg) <- 'xyzirc'  # keep only necessary features
 opt_filter(ctg) <- '-drop_class 7 18'  # drop noise-classified points
 
@@ -150,7 +153,7 @@ lidar_metrics <- crop(lidar_metrics, nir)
 compareGeom(lidar_metrics, nir)   # errors if the grids don't match
 
 # read in DTM and resample to match 10-m grid
-dtm <- rast(file.path('~/path/to/1m_DTM'))
+dtm <- rast(path.expand(paths$dtm))
 dtm_10m <- resample(dtm, nir, method = 'average')
 
 compareGeom(s2_stack, dtm_10m)

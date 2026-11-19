@@ -1,0 +1,3 @@
+slrm: "path/to/simple_local_relief_model.tif"
+dtm: "path/to/digital_terrain_model.tif"
+unlabeled_chunks: "path/to/chunks_to_be_labeled.shp"

@@ -1,3 +1,0 @@
-predictors: "~/Documents/CSRM/Further_Pohnpei_work/RRNES_grant/Publications/lidar_methods_paper/deep_learning/data_used_for_pub/mangrove_classification/all_predictors.tif"
-labels: "~/Documents/CSRM/Further_Pohnpei_work/RRNES_grant/Publications/lidar_methods_paper/deep_learning/data_used_for_pub/mangrove_classification/class_labels.shp"
-dtm_10m: "~/Documents/CSRM/Further_Pohnpei_work/RRNES_grant/lidar/jake_DEMs/DTM_denoised_corrected_kriging_1m.tif"

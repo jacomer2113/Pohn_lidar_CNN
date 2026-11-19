@@ -11,7 +11,7 @@ require(pROC)
 
 ``` r
 # load in stack of predictor layers and class labels
-paths <- yaml::read_yaml('paths.yml')
+paths <- yaml::read_yaml('../paths.yml')
 predictors <- rast(path.expand(paths$predictors))
 labels <- vect(path.expand(paths$labels))
 
@@ -179,7 +179,7 @@ area_km2 <- function(r) {
 }
 
 # read in and resample the DTM
-dtm <- rast(path.expand(paths$dtm_10m))
+dtm <- rast(path.expand(paths$dtm))
 dtm_10m <- resample(dtm, predictors$nir, method = 'average')
 
 # total area skipped within modeled area
@@ -372,3 +372,11 @@ plot(final_fixed)
 ```
 
 ![](mangrove_modeling_markdown_files/figure-gfm/final_map-1.png)<!-- -->
+Write to disk a raster layer that identifies the two land groups,
+mainland and lagoon islands, and dropping the unsurveyed gap.
+
+``` r
+land_groups <- ifel(id %in% mainland_ids & gap == 0, 1,
+                    ifel(id %in% small_islands$value, 2, NA))
+writeRaster(land_groups, path.expand(paths$land_groups), overwrite = TRUE)
+```

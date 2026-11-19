@@ -4,17 +4,16 @@ require(sfheaders)
 require(ggplot2)
 require(ggpubr)
 
-# Set islands to TRUE if dealing with lagoon islets of significant size.
-# Otherwise make FALSE.
-islands <- TRUE
+# identify input data paths
+paths <- yaml::read_yaml('../paths.yml')
 
 # Load in 10-meter probability map.
-pmap <- rast('~/path/to/prob_map')
+pmap <- rast(path.expand(paths$pmap))
 
 # Load in the labeled training and testing data, so that we can merge
 # the labeled data with the predictions. This way, the predicted probability
 # map won't have gaps where the training and testing data are.
-labeled <- st_read(paste0('~/shapefile_filename.shp'))
+labeled <- st_read(path.expand(paths$labeled_data))
 labeled <- labeled[which(!is.na(labeled$label)), ]  # Isolate labeled data.
 
 # Fill in blank spots in probability map (from which testing and training
@@ -24,18 +23,17 @@ labeled_coordinates <- st_coordinates(labeled_centroids)
 labeled_cells <- cellFromXY(pmap, labeled_coordinates)
 pmap[labeled_cells] <- labeled$label
 
-# Load in the masks we made with Sentinel-2 data. The first masks both
-# mangroves and water; the second masks only water.
-mask <- rast(paste0('~/total_mask_10m.tif'))
-water_mask <- rast(paste0('~/nir_water_mask_10m.tif'))
+# Load in the mangrove/non-mangrove land/water map
+class_map <- rast(path.expand(paths$class_map))
 
-# Calculate total area that is not water, in m ^ 2.
-water_mask_df <- as.data.frame(water_mask)
-not_water_m2 <- (nrow(water_mask_df) - sum(water_mask_df)) *
-  ((res(water_mask)[1] * res(water_mask)[2]))
+# Load in the mainland vs. lagoon islands map
+land_groups <- rast(path.expand(paths$land_groups))
+
+# Water and mangrove mask:
+mask <- ifel(class_map == 2, 0, 1)
 
 # Load in 1-meter DTM.
-dtm <- rast(paste0('~/DTM_denoised_corrected_kriging_1m.tif'))
+dtm <- rast(path.expand(paths$dtm))
 
 # Use the total mask on the probability map.
 pmap_mask_int <- intersect(ext(pmap), ext(mask))
@@ -51,71 +49,18 @@ pmap_not_NA[!is.na(pmap_not_NA)] <- 1
 dtm_10m <- resample(dtm, pmap_not_NA)
 
 # Load in the geology shapefile and rasterize it.
-geo <- st_read(paste0('~/phn_geology_detailed.shp'))
+geo <- st_read(path.expand(paths$geology))
 geo_vec <- vect(geo)
 geo_rast <- rasterize(geo_vec, dtm_10m, field = 'Type')
 
 # Do the same for the soils shapefile.
-soil <- st_read(paste0('~/phn_soils.shp'))
+soil <- st_read(path.expand(paths$soils))
 soil_vec <- vect(soil)
 soil_rast <- rasterize(soil_vec, dtm_10m, field = 'GENSOIL')
 
-# Polygonize the non-NA parts of the probability map.
-pmap_vects <- as.polygons(pmap_not_NA, dissolve = TRUE)
-pmap_sf <- sf::st_as_sf(pmap_vects)  # Make those vectors into an sf object.
-pmap_sf <- sf::st_cast(pmap_sf, 'POLYGON')  # Recast the multipolygon object as
-# a polygon object.
-pmap_areas <- as.numeric(sf::st_area(pmap_sf))  # Calculate the polygons' areas.
-pmap_sf$area <- pmap_areas  # Add those areas to the sf object.
-
-# Isolate polygon for Pohnpei mainland (the largest polygon).
-pohnpei_mainland_sf <- pmap_sf[which(pmap_sf$area == max(pmap_sf$area)), ]
-
-# Identify polygons for Pohnpei mainland plus all islets of significant size,
-# minus airport.
-significant_la_ids <- c(2, 9, 11, 14, 55, 138, 157, 254, 271, 322, 359, 370,
-                        372, 659, 360, 272, 227, 85, 88, 112, 80, 660)
-significant_sf <- pmap_sf[significant_la_ids, ]
-surveyed_area <- as.numeric(sum(st_area(significant_sf)))
-
-# Fill in that big data gap in the center.
-pohnpei_main_filled <- sf_remove_holes(pohnpei_mainland_sf)
-pohnpei_mainland_area <- as.numeric(st_area(pohnpei_main_filled))
-data_gap_area <- pohnpei_mainland_area -
-  as.numeric(st_area(pohnpei_mainland_sf))
-mainland_surveyed <- pohnpei_mainland_area - data_gap_area
-significant_sf_filled <- sf_remove_holes(significant_sf)
-significant_islands_area <- as.numeric(sum(st_area(significant_sf_filled)) -
-                                         st_area(pohnpei_main_filled))
-
-# Make a polygon of the gap.
-island_w_gap_geom <- st_geometry(pohnpei_mainland_sf)[[1]]
-hole_indices <- 2:length(island_w_gap_geom)
-hole_areas <- sapply(hole_indices, function(i) {
-  st_area(st_sfc(st_polygon(list(island_w_gap_geom[[i]])), crs = st_crs(pohnpei_mainland_sf)))
-})
-largest_hole_ind <- hole_indices[which.max(hole_areas)]
-
-gap_ring <- island_w_gap_geom[[largest_hole_ind]]
-gap_poly <- st_polygon(list(gap_ring))
-gap_poly <- st_sfc(gap_poly, crs = 'epsg:32657')
-gap_poly <- st_sf(geometry = gap_poly)
-
-# Convert our data gap polygon to a linestring, which we can use to extract
-# distance-to-lagoon values for every cell that falls along the polygon
-# boundary.
-gap_bound <- st_boundary(gap_poly)
-
-if (islands == TRUE) {
-  hole_sf <- significant_sf
-  filled_sf <- significant_sf_filled
-} else {
-  hole_sf <- pohnpei_mainland_sf
-  filled_sf <- pohnpei_main_filled
-}
-
 # Find the island's centroid.
-island_center <- st_coordinates(st_centroid(pohnpei_main_filled))
+mainland_vect <- fillHoles(as.polygons(ifel(land_groups == 1, 1, NA)))
+island_center <- crds(centroids(mainland_poly))[1, ]
 
 # Find the numbers of all cells for which there is a predicted probability.
 pred_cells <- cells(pmap_masked)
@@ -140,32 +85,39 @@ angle_map <- pmap_masked
 angle_map[pred_cells] <- thetas
 
 # Mask that angle map of all but the Pohnpei mainland.
-angle_masked <- mask(angle_map, vect(hole_sf))
+mainland_land <- ifel(land_groups == 1, 1, NA)
+mainland_land <- resample(mainland_land, dtm_10m)
+angle_masked <- mask(resample(angle_map, mainland_land), mainland_land)
 
 # Create distance-to-lagoon map.
+land_groups <- resample(land_groups, pmap_masked)
+land_nogap <- fillHoles(land_groups)
 dist_map <- pmap_masked
 values(dist_map) <- 1
-dist_map <- mask(dist_map, vect(significant_sf_filled), inverse = TRUE)
+dist_map <- mask(resample(dist_map, land_nogap), land_nogap, inverse = TRUE)
 dist_map <- distance(dist_map)
-dist_map_masked <- mask(dist_map, vect(significant_sf))
+dist_map_masked <- mask(dist_map, land_nogap)
 
 # Find the maximum margin, inward from the lagoon, at which there is data
 # all around the island.
-dist_lagoon_to_gap <- extract(dist_map, vect(gap_bound))
+gaps <- disagg(fillHoles(as.polygons(mainland_land), inverse = TRUE))
+gap_areas <- expanse(gaps, unit = 'km')
+central_gap <- gaps[which.max(gap_areas)]
+dist_lagoon_to_gap <- extract(dist_map, central_gap, ID = FALSE)
 uni_lag_dist <- dist_map_masked
 uni_lag_dist[uni_lag_dist > min(dist_lagoon_to_gap)] <- NA
 
 # Mask the DTM of all but Pohnpei mainland.
-pohn_dtm <- mask(dtm_10m, vect(hole_sf))
+pohn_dtm <- mask(dtm_10m, mainland_vect)
 
 # Mask the probability map of all but the Pohnpei mainland.
-pmap_masked <- mask(pmap_masked, vect(hole_sf))
+pmap_masked <- mask(pmap_masked, mainland_vect)
 
 # Mask the geology map of all but the Pohnpei mainland.
-geo_masked <- mask(geo_rast, vect(hole_sf))
+geo_masked <- mask(geo_rast, mainland_vect)
 
 # Mask the soils map of all but the Pohnpei mainland.
-soil_masked <- mask(soil_rast, vect(hole_sf))
+soil_masked <- mask(soil_rast, mainland_vect)
 
 # Generate slope and aspect layers from the DTM.
 dtm_prod <- terra::terrain(pohn_dtm, v = c('slope', 'aspect'))
@@ -175,15 +127,10 @@ binary <- pmap_masked
 binary[binary > 0.5] <- 1
 binary[binary <= 0.5] <- 0
 
-# Create a binary map of mainland-Pohnpei-or-not.
-mainland <- pmap_masked
-values(mainland) <- 1
-mainland <- mask(mainland, vect(pohnpei_mainland_sf), updatevalue = 0)
-
 # Stack the distance-to-lagoon map, probability map, and 10-meter DTM.
 rstack <- c(angle_masked, dist_map_masked, geo_masked, soil_masked,
             pmap_masked, binary, pohn_dtm, dtm_prod[[1]], dtm_prod[[2]],
-            mainland)
+            mainland_land)
 names(rstack) <- c('angle', 'dist_to_lagoon', 'geo_type', 'soil_type',
                    'prob', 'binary', 'elev', 'slope', 'aspect',
                    'mainland')
@@ -208,30 +155,26 @@ pos_pred_km2 <- pos_pred_m2 / 1000000
 mainland_df <- rstack_df_clean[which(rstack_df_clean$mainland == 1), ]
 mainland_pos_m2 <- sum(mainland_df$binary == TRUE) * ((res(pmap)[1] * res(pmap)[2]))
 
+lag_islands <- ifel(land_groups == 2, 1, NA)
+
+pohnpei_mainland_area <- as.numeric(
+  expanse(fillHoles(mainland_land), unit = 'm')[2])
+mainland_surveyed <- as.numeric(expanse(mainland_land, unit = 'm')[2])
+lag_islands_surveyed <- as.numeric(expanse(lag_islands, unit = 'm')[2])
+total_surveyed <- mainland_surveyed + lag_islands_surveyed
+
 key_labs <- c('mainland_area', 'mainland_area_surveyed',
               'surveyed_lagoon_islands_area', 'area_surveyed',
               'area_classified_pos', 
               'mainland_area_classified_pos',
-              'prop_pos_surveyed',
-              'prop_pos_mainland_plus_islets')
+              'prop_pos_surveyed')
 key_stats_m2 <- c(pohnpei_mainland_area, mainland_surveyed,
-                  (surveyed_area - mainland_surveyed),
-                  surveyed_area, pos_pred_m2,
+                  lag_islands_surveyed,
+                  total_surveyed,
+                  pos_pred_m2,
                   mainland_pos_m2,
-                  (pos_pred_m2 / surveyed_area),
-                  (pos_pred_m2 /
-                     (pohnpei_mainland_area +
-                        (surveyed_area - mainland_surveyed))))
+                  (pos_pred_m2 / total_surveyed))
 key_results <- data.frame(key_labs, key_stats_m2)
-
-key_results_path <- paste0('~/Documents/CSRM/Further_Pohnpei_work/',
-                           'RRNES_grant/Publications/lidar_methods_paper/Drafts/Figures/',
-                           'key_results.csv')
-
-if (!file.exists(key_results_path)) {
-  write.csv(t(key_results), key_results_path)
-}
-
 
 ################ SOIL #########################################################
 soil_type <- levels(rstack_df_clean$soil_type)
@@ -312,9 +255,8 @@ rose_prob <- ggplot(prop_df, aes(bins, prop)) + geom_col() +
 
 # For plotting: Make a polygon that shows the margin for which we have 
 # data all around the island.
-inner_margin <- st_buffer(pohnpei_main_filled, -min(dist_lagoon_to_gap))
-data_margin <- st_difference(pohnpei_main_filled, inner_margin)
-st_write(data_margin, '~/Documents/CSRM/Further_Pohnpei_work/RRNES_grant/Publications/lidar_methods_paper/GIS/uniform_data_margin.shp')
+inner_margin <- st_buffer(st_as_sf(mainland_vect), -min(dist_lagoon_to_gap))
+data_margin <- st_difference(st_as_sf(mainland_vect), inner_margin)
 
 # Calculate count of positive-classified cells per 10-degree slice.
 bins <- as.factor(levels(margin_df$theta_bin_10))
@@ -401,6 +343,7 @@ bin_dist_point <- ggplot(bin_df, aes(bin, prob)) + geom_point(size = 0.5)
 
 # Heatmap, mean probability against distance to lagoon.
 heatmap <- dist_map_masked
+heatmap <- mask(heatmap, central_gap, inverse = TRUE)
 heatmap <- (heatmap %/% des_binwidth)
 for (i in 1:max(values(heatmap), na.rm = TRUE)) {
   heatmap[heatmap == i] <- bin_df[which(bin_df$bin == i), 'prob']
